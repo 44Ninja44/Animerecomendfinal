@@ -168,11 +168,15 @@ def load_models():
     return anime_df, ratings_df, cb_model, cf_model
 
 
-anime_df, ratings_df, cb_model, cf_model = load_models()
-all_genres = ["All"] + get_all_genres(anime_df)
-all_types = ["All"] + get_all_types(anime_df)
-all_names = get_anime_names(anime_df)
-
+try:
+    anime_df, ratings_df, cb_model, cf_model = load_models()
+    all_genres = ["All"] + get_all_genres(anime_df)
+    all_types = ["All"] + get_all_types(anime_df)
+    all_names = get_anime_names(anime_df)
+except Exception as e:
+    import traceback
+    st.error(f"❌ Ошибка запуска:\n\n```\n{traceback.format_exc()}\n```")
+    st.stop()
 
 # ─── Header ───────────────────────────────────────────────────────────────────
 st.markdown("""
