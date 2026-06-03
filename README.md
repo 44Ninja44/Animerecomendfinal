@@ -4,7 +4,7 @@ A Streamlit app that recommends anime using two approaches:
 - **Content-Based Filtering** — cosine similarity on genre/type features
 - **Collaborative Filtering** — item-based and user-based (cosine on user-item matrix)
 
-**Live demo:** *(https://animerecomendfinal.streamlit.app/)*
+**Live demo:** *([https://animerecomendfinal.streamlit.app/](https://animerecomendfinal.streamlit.app/))*
 
 ---
 
