@@ -54,17 +54,37 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
             _download_gdrive(RATINGS_GDRIVE_ID, raw_cache, "ratings.csv")
 
         st.info("⚙️ Обработка ratings.csv (один раз)…")
-        chunks = []
-        for chunk in pd.read_csv(raw_cache, chunksize=500_000):
-            chunk = chunk[chunk["rating"].between(1, 10)]
-            chunks.append(chunk)
-        full = pd.concat(chunks, ignore_index=True)
 
-        user_counts = full["user_id"].value_counts()
-        active_users = user_counts[user_counts >= 5].index
-        full = full[full["user_id"].isin(active_users)]
-        sampled = full.sample(n=min(RATINGS_SAMPLE, len(full)), random_state=42)
+        # Pass 1: count user ratings without loading everything into memory
+        user_counts = {}
+        for chunk in pd.read_csv(raw_cache, chunksize=200_000,
+                                  usecols=["user_id", "rating"]):
+            chunk = chunk[chunk["rating"].between(1, 10)]
+            for uid, cnt in chunk["user_id"].value_counts().items():
+                user_counts[uid] = user_counts.get(uid, 0) + cnt
+
+        active_users = {uid for uid, cnt in user_counts.items() if cnt >= 5}
+
+        # Pass 2: collect valid rows, reservoir-sample to RATINGS_SAMPLE
+        import random
+        random.seed(42)
+        reservoir = []
+        seen = 0
+        for chunk in pd.read_csv(raw_cache, chunksize=200_000):
+            chunk = chunk[chunk["rating"].between(1, 10)]
+            chunk = chunk[chunk["user_id"].isin(active_users)]
+            for row in chunk.itertuples(index=False):
+                seen += 1
+                if len(reservoir) < RATINGS_SAMPLE:
+                    reservoir.append(row)
+                else:
+                    j = random.randint(0, seen - 1)
+                    if j < RATINGS_SAMPLE:
+                        reservoir[j] = row
+
+        sampled = pd.DataFrame(reservoir, columns=["user_id", "anime_id", "rating"])
         sampled.to_csv(ratings_cache, index=False)
+        del reservoir
 
         try:
             os.remove(raw_cache)
