@@ -1,15 +1,10 @@
 """
-Collaborative Filtering for Anime Recommendations.
-
-Implements two approaches:
-1. Item-Based CF: find anime similar to what the user liked based on other users' patterns
-2. User-Based CF: find similar users, use their ratings to predict scores
-
-Both use cosine similarity on the user-item matrix.
+Collaborative Filtering — sparse implementation for low-memory environments.
 """
 
 import pandas as pd
 import numpy as np
+from scipy.sparse import csr_matrix
 from sklearn.metrics.pairwise import cosine_similarity
 
 
@@ -17,72 +12,51 @@ class CollaborativeFilteringRecommender:
     def __init__(self, anime_df: pd.DataFrame, ratings_df: pd.DataFrame):
         self.anime_df = anime_df.copy()
         self.ratings_df = ratings_df.copy()
-        self.user_item_matrix = None
-        self.item_similarity = None
-        self.user_similarity = None
         self._build()
 
     def _build(self):
-        """Build user-item matrix and precompute similarity matrices."""
-        # Pivot to user-item matrix (rows=users, cols=anime)
-        self.user_item_matrix = self.ratings_df.pivot_table(
-            index="user_id", columns="anime_id", values="rating"
-        ).fillna(0)
+        # Map user/anime ids to integer indices
+        users = self.ratings_df["user_id"].unique()
+        items = self.ratings_df["anime_id"].unique()
 
-        # Item-item cosine similarity (transpose so items are rows)
-        item_matrix = self.user_item_matrix.T.values
-        self.item_similarity = cosine_similarity(item_matrix)
-        self.item_sim_df = pd.DataFrame(
-            self.item_similarity,
-            index=self.user_item_matrix.columns,
-            columns=self.user_item_matrix.columns,
+        self.user2idx = {u: i for i, u in enumerate(users)}
+        self.item2idx = {it: i for i, it in enumerate(items)}
+        self.idx2item = {i: it for it, i in self.item2idx.items()}
+
+        rows = self.ratings_df["user_id"].map(self.user2idx)
+        cols = self.ratings_df["anime_id"].map(self.item2idx)
+        vals = self.ratings_df["rating"].astype(np.float32)
+
+        self.sparse_matrix = csr_matrix(
+            (vals, (rows, cols)),
+            shape=(len(users), len(items)),
+            dtype=np.float32,
         )
 
-        # User-user cosine similarity
-        user_matrix = self.user_item_matrix.values
-        self.user_similarity = cosine_similarity(user_matrix)
-        self.user_sim_df = pd.DataFrame(
-            self.user_similarity,
-            index=self.user_item_matrix.index,
-            columns=self.user_item_matrix.index,
-        )
-
-    def recommend_item_based(
-        self,
-        user_ratings: dict,        # {anime_name: rating}
-        top_n: int = 10,
-        genre_filter: str = None,
-        type_filter: str = None,
-    ) -> pd.DataFrame:
-        """
-        Item-based collaborative filtering.
-        For each rated anime, find similar items based on user-rating patterns.
-        """
+    def recommend_item_based(self, user_ratings, top_n=10,
+                              genre_filter=None, type_filter=None):
         name_to_id = dict(zip(self.anime_df["name"], self.anime_df["anime_id"]))
-        id_to_name = dict(zip(self.anime_df["anime_id"], self.anime_df["name"]))
 
-        rated_ids = {}
+        rated_items = {}
         for name, rating in user_ratings.items():
-            if name in name_to_id:
-                aid = name_to_id[name]
-                if aid in self.item_sim_df.index:
-                    rated_ids[aid] = rating
+            aid = name_to_id.get(name)
+            if aid is not None and aid in self.item2idx:
+                rated_items[self.item2idx[aid]] = rating / 10.0
 
-        if not rated_ids:
+        if not rated_items:
             return pd.DataFrame()
 
-        # Weighted sum of similarities from rated items
-        all_items = self.item_sim_df.columns.tolist()
+        # For each rated item compute similarity with all other items
         score_dict = {}
-        weight_total = 0.0
+        weight_total = sum(rated_items.values())
 
-        for aid, rating in rated_ids.items():
-            weight = rating / 10.0
-            sim_row = self.item_sim_df.loc[aid]
-            for item_id, sim in sim_row.items():
-                if item_id not in rated_ids:
-                    score_dict[item_id] = score_dict.get(item_id, 0) + weight * sim
-            weight_total += weight
+        for item_idx, weight in rated_items.items():
+            item_vec = self.sparse_matrix[:, item_idx].T  # (1, n_users)
+            # Compute cosine similarity between this item and all items
+            sims = cosine_similarity(item_vec, self.sparse_matrix.T)[0]
+            for i, sim in enumerate(sims):
+                if i not in rated_items:
+                    score_dict[i] = score_dict.get(i, 0) + weight * float(sim)
 
         if weight_total > 0:
             score_dict = {k: v / weight_total for k, v in score_dict.items()}
@@ -90,16 +64,15 @@ class CollaborativeFilteringRecommender:
         if not score_dict:
             return pd.DataFrame()
 
-        scores_df = pd.DataFrame(
-            list(score_dict.items()), columns=["anime_id", "cf_score"]
-        )
-        result = scores_df.merge(self.anime_df, on="anime_id")
+        top = sorted(score_dict.items(), key=lambda x: x[1], reverse=True)[:top_n * 3]
+        anime_ids = [self.idx2item[i] for i, _ in top]
+        scores = [s for _, s in top]
 
-        # Filters
+        result = pd.DataFrame({"anime_id": anime_ids, "cf_score": scores})
+        result = result.merge(self.anime_df, on="anime_id")
+
         if genre_filter and genre_filter != "All":
-            result = result[
-                result["genre"].str.contains(genre_filter, na=False, case=False)
-            ]
+            result = result[result["genre"].str.contains(genre_filter, na=False, case=False)]
         if type_filter and type_filter != "All":
             result = result[result["type"] == type_filter]
 
@@ -108,53 +81,37 @@ class CollaborativeFilteringRecommender:
             columns={"cf_score": "score", "rating": "mal_rating"}
         )
 
-    def recommend_user_based(
-        self,
-        user_ratings: dict,
-        top_n: int = 10,
-        genre_filter: str = None,
-        type_filter: str = None,
-        n_neighbors: int = 20,
-    ) -> pd.DataFrame:
-        """
-        User-based collaborative filtering.
-        Build a virtual user profile, find similar real users, aggregate their ratings.
-        """
+    def recommend_user_based(self, user_ratings, top_n=10,
+                              genre_filter=None, type_filter=None, n_neighbors=20):
         name_to_id = dict(zip(self.anime_df["name"], self.anime_df["anime_id"]))
 
-        # Build virtual user rating vector aligned with matrix columns
-        virtual_user = pd.Series(0.0, index=self.user_item_matrix.columns)
-        rated_ids = set()
+        virtual = np.zeros(self.sparse_matrix.shape[1], dtype=np.float32)
+        rated_idxs = set()
         for name, rating in user_ratings.items():
-            if name in name_to_id:
-                aid = name_to_id[name]
-                if aid in virtual_user.index:
-                    virtual_user[aid] = float(rating)
-                    rated_ids.add(aid)
+            aid = name_to_id.get(name)
+            if aid is not None and aid in self.item2idx:
+                idx = self.item2idx[aid]
+                virtual[idx] = float(rating)
+                rated_idxs.add(idx)
 
-        if not rated_ids:
+        if not rated_idxs:
             return pd.DataFrame()
 
-        # Cosine similarity between virtual user and all real users
-        virtual_vec = virtual_user.values.reshape(1, -1)
-        real_matrix = self.user_item_matrix.values
-        sims = cosine_similarity(virtual_vec, real_matrix)[0]
+        virtual_sparse = csr_matrix(virtual.reshape(1, -1))
+        sims = cosine_similarity(virtual_sparse, self.sparse_matrix)[0]
 
-        sim_df = pd.Series(sims, index=self.user_item_matrix.index).sort_values(
-            ascending=False
-        ).head(n_neighbors)
+        top_users = np.argsort(sims)[::-1][:n_neighbors]
+        weight_total = sims[top_users].sum()
 
-        # Weighted average of neighbor ratings for unseen items
         score_dict = {}
-        weight_total = sim_df.sum()
-
-        for user_id, sim in sim_df.items():
+        for u_idx in top_users:
+            sim = float(sims[u_idx])
             if sim <= 0:
                 continue
-            user_row = self.user_item_matrix.loc[user_id]
-            for item_id, r in user_row.items():
-                if r > 0 and item_id not in rated_ids:
-                    score_dict[item_id] = score_dict.get(item_id, 0) + sim * r
+            user_row = self.sparse_matrix[u_idx].toarray()[0]
+            for i, r in enumerate(user_row):
+                if r > 0 and i not in rated_idxs:
+                    score_dict[i] = score_dict.get(i, 0) + sim * float(r)
 
         if weight_total > 0:
             score_dict = {k: v / weight_total for k, v in score_dict.items()}
@@ -162,15 +119,15 @@ class CollaborativeFilteringRecommender:
         if not score_dict:
             return pd.DataFrame()
 
-        scores_df = pd.DataFrame(
-            list(score_dict.items()), columns=["anime_id", "cf_score"]
-        )
-        result = scores_df.merge(self.anime_df, on="anime_id")
+        top = sorted(score_dict.items(), key=lambda x: x[1], reverse=True)[:top_n * 3]
+        anime_ids = [self.idx2item[i] for i, _ in top]
+        scores = [s for _, s in top]
+
+        result = pd.DataFrame({"anime_id": anime_ids, "cf_score": scores})
+        result = result.merge(self.anime_df, on="anime_id")
 
         if genre_filter and genre_filter != "All":
-            result = result[
-                result["genre"].str.contains(genre_filter, na=False, case=False)
-            ]
+            result = result[result["genre"].str.contains(genre_filter, na=False, case=False)]
         if type_filter and type_filter != "All":
             result = result[result["type"] == type_filter]
 
@@ -179,15 +136,12 @@ class CollaborativeFilteringRecommender:
             columns={"cf_score": "score", "rating": "mal_rating"}
         )
 
-    def get_stats(self) -> dict:
-        """Return dataset statistics."""
+    def get_stats(self):
+        n_ratings = self.sparse_matrix.nnz
+        n_users, n_items = self.sparse_matrix.shape
         return {
-            "n_users": len(self.user_item_matrix.index),
-            "n_anime": len(self.user_item_matrix.columns),
-            "n_ratings": int((self.user_item_matrix > 0).sum().sum()),
-            "sparsity": round(
-                1 - (self.user_item_matrix > 0).sum().sum()
-                / (self.user_item_matrix.shape[0] * self.user_item_matrix.shape[1]),
-                4,
-            ),
+            "n_users": n_users,
+            "n_anime": n_items,
+            "n_ratings": n_ratings,
+            "sparsity": round(1 - n_ratings / (n_users * n_items), 4),
         }
