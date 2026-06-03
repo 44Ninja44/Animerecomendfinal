@@ -12,7 +12,8 @@ import numpy as np
 import streamlit as st
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR = os.path.join(_HERE, ".data_cache")
+# /tmp persists for the lifetime of the server and won't be wiped by git pulls
+CACHE_DIR = "/tmp/anime_recommender_cache"
 
 # Google Drive file ID для ratings.csv
 RATINGS_GDRIVE_ID = "1ICeM6mzu4HZme8V_CLj5JO8fU3-qYINC"
